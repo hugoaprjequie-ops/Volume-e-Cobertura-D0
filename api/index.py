@@ -1,33 +1,30 @@
 import os
 import io
+import json
 import pandas as pd
 import numpy as np
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
 
-# ID da pasta do Google Drive fornecido
 FOLDER_ID = "1Kw_oHgF0npTcXLkMKek51bKdAF0TAWca"
 
 def get_drive_service():
-    """Autentica na API do Google Drive usando variáveis de ambiente da Vercel"""
     try:
-        # Na Vercel, podemos armazenar as credenciais como Variáveis de Ambiente (Environment Variables)
-        # Ou ler de um secret JSON estruturado
-        import json
         gcp_creds_json = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
-        if gcp_creds_json:
-            creds_dict = json.loads(gcp_creds_json)
-            creds = service_account.Credentials.from_service_account_info(
-                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
-            )
-            return build('drive', 'v3', credentials=creds)
+        if not gcp_creds_json:
+            return None
+        creds_dict = json.loads(gcp_creds_json)
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        return build('drive', 'v3', credentials=creds)
     except Exception as e:
         print(f"Erro de autenticação: {e}")
-    return None
+        return None
 
 def baixar_csv_do_drive(service, file_name_pattern):
     try:
@@ -55,16 +52,24 @@ def baixar_csv_do_drive(service, file_name_pattern):
 def index():
     service = get_drive_service()
     if not service:
-        return "Erro: Credenciais do Google Drive (GCP_SERVICE_ACCOUNT_JSON) não configuradas nas variáveis de ambiente da Vercel."
+        return """
+        <h3>⚠️️ Erro de Configuração</h3>
+        <p>A variável de ambiente <b>GCP_SERVICE_ACCOUNT_JSON</b> não foi configurada corretamente na Vercel ou o JSON está inválido.</p>
+        <p>Vá em <i>Settings > Environment Variables</i> na Vercel e adicione as credenciais da sua conta de serviço do Google Cloud.</p>
+        """, 500
 
     df_pedidos = baixar_csv_do_drive(service, "03.01.36.04")
     df_bees = baixar_csv_do_drive(service, "03.01.46.06")
     df_skus = baixar_csv_do_drive(service, "01.11")
 
     if df_pedidos is None or df_bees is None or df_skus is None:
-        return "Erro: Não foi possível carregar os arquivos CSV na pasta do Google Drive."
+        return """
+        <h3>⚠️ Erro ao Localizar Arquivos</h3>
+        <p>Não foi possível encontrar os arquivos CSV exigidos dentro da pasta do Google Drive.</p>
+        <p>Certifique-se de que a conta de serviço tem permissão de leitura na pasta e que os arquivos começam com: <b>03.01.36.04</b>, <b>03.01.46.06</b> e <b>01.11</b>.</p>
+        """, 500
 
-    # Processamento e Tratamento
+    # Processamento padrão
     df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL'}, inplace=True)
     df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'], errors='coerce').fillna(0)
     df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
@@ -91,7 +96,6 @@ def index():
 
     df_merged['Gerente'] = df_merged['Setor'].apply(define_gerente)
 
-    # Agrupamentos
     resumo_vol = df_merged.groupby(['Gerente', 'Setor']).agg({
         'Volume_HL': 'sum',
         'Vol_Cerveja': 'sum',
@@ -103,7 +107,6 @@ def index():
         Clientes_Positivados=('Cod. PDV', 'nunique')
     ).reset_index() if 'Cod. PDV' in df_merged.columns else pd.DataFrame()
 
-    # HTML de Resposta com Abas Simples (Bootstrap)
     html_template = """
     <!doctype html>
     <html lang="pt-br">
