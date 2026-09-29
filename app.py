@@ -67,36 +67,35 @@ if service:
         df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'], errors='coerce').fillna(0)
         df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
         
-        # Correção do FHL (Dividindo por 10 para ajustar a escala exata solicitada)
+        # Correção exata do FHL (ajustando a escala conforme solicitado)
         df_skus['FHL'] = pd.to_numeric(df_skus['FHL'], errors='coerce').fillna(1.0) / 10.0
 
         # Cruzamento com SKUs na rotina do dia
         df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria', 'FHL']], on='Produto', how='left')
         df_merged['Volume_HL'] = df_merged['Quantidade'] * df_merged['FHL']
 
-        # Segmentações de Categoria
-        df_merged['Vol_Cerveja'] = np.where(df_merged['Categoria'].str.upper().str.contains('CERVEJA', na=False), df_merged['Volume_HL'], 0)
-        df_merged['Vol_NAB'] = np.where(df_merged['Categoria'].str.upper().str.contains('NAB', na=False), df_merged['Volume_HL'], 0)
+        # Segmentações de Categoria com tratamento seguro de string
+        cat_series = df_merged['Categoria'].fillna("").astype(str).str.upper()
+        df_merged['Vol_Cerveja'] = np.where(cat_series.str.contains('CERVEJA', na=False), df_merged['Volume_HL'], 0)
+        df_merged['Vol_NAB'] = np.where(cat_series.str.contains('NAB', na=False), df_merged['Volume_HL'], 0)
 
-        # Faturamento Marketplace unificando as colunas das rotinas (03.01.36.04 e 03.01.46.06 do BEES)
-        # Verificando Total Pedido na rotina 04 e Valor Total Pedido na rotina BEES
+        # Faturamento Marketplace na rotina principal (03.01.36.04)
         if 'Total Pedido' in df_merged.columns and 'Origem Pedido' in df_merged.columns:
+            origem_p = df_merged['Origem Pedido'].fillna("").astype(str).str.upper()
             df_merged['Fat_Marketplace'] = np.where(
-                df_merged['Origem Pedido'].str.upper().str.contains('MARKETPLACE', na=False), 
+                origem_p.str.contains('MARKETPLACE', na=False), 
                 pd.to_numeric(df_merged['Total Pedido'], errors='coerce').fillna(0), 0
             )
         else:
             df_merged['Fat_Marketplace'] = 0
 
-        # Tratando também os pedidos do BEES caso estejam presentes para somar ao Marketplace / Volume
+        # Tratamento seguro para a base do BEES (03.01.46.06)
+        fat_bees_total = 0.0
         if df_bees is not None and not df_bees.empty:
             if 'Valor Total Pedido' in df_bees.columns and 'Origem Pedido' in df_bees.columns:
-                df_bees['Fat_Marketplace'] = np.where(
-                    df_bees['Origem Pedido'].str.upper().str.contains('MARKETPLACE', na=False),
-                    pd.to_numeric(df_bees['Valor Total Pedido'], errors='coerce').fillna(0), 0
-                )
-            else:
-                df_bees['Fat_Marketplace'] = 0
+                origem_b = df_bees['Origem Pedido'].fillna("").astype(str).str.upper()
+                val_bees = pd.to_numeric(df_bees['Valor Total Pedido'], errors='coerce').fillna(0)
+                fat_bees_total = np.where(origem_b.str.contains('MARKETPLACE', na=False), val_bees, 0).sum()
 
         # Atribuição de Gerente de Vendas
         def define_gerente(setor):
@@ -129,10 +128,8 @@ if service:
         tot_cerveja = df_filtrado['Vol_Cerveja'].sum()
         tot_nab = df_filtrado['Vol_NAB'].sum()
         
-        # Somando faturamento marketplace considerando a base filtrada + BEES se houver correspondência
-        tot_mkt = df_filtrado['Fat_Marketplace'].sum()
-        if df_bees is not None and 'Fat_Marketplace' in df_bees.columns:
-            tot_mkt += df_bees['Fat_Marketplace'].sum()
+        # Somando faturamento marketplace da rotina filtrada + total do BEES
+        tot_mkt = df_filtrado['Fat_Marketplace'].sum() + fat_bees_total
 
         st.markdown("---")
         col1, col2, col3, col4 = st.columns(4)
