@@ -9,16 +9,14 @@ from googleapiclient.http import MediaIoBaseDownload
 st.set_page_config(page_title="Dashboard Diário - Volume & Cobertura", layout="wide")
 
 st.title("📊 Painel Diário de Vendas - GP7 Jequié")
-st.markdown("Acompanhamento de **Volume (HL)**, **Cerveja**, **NAB**, **Marketplace** e **Cobertura** integrados diretamente do Google Drive.")
+st.markdown("Acompanhamento automático de **Volume (HL)**, **Cerveja**, **NAB**, **Marketplace** e **Cobertura** via Google Drive.")
 
-# ID da pasta do Google Drive fornecido
 FOLDER_ID = "1Kw_oHgF0npTcXLkMKek51bKdAF0TAWca"
 
 @st.cache_resource
 def get_drive_service():
-    """Autentica na API do Google Drive usando os segredos do Streamlit ou credenciais locais"""
+    """Autentica na API do Google Drive usando os segredos do Streamlit"""
     try:
-        # Se estiver configurado no Streamlit Cloud secrets
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
             creds = service_account.Credentials.from_service_account_info(
@@ -30,19 +28,14 @@ def get_drive_service():
     return None
 
 def baixar_csv_do_drive(service, file_name_pattern):
-    """Busca o arquivo na pasta pelo padrão do nome e baixa o conteúdo em DataFrame"""
     try:
-        # Query para buscar arquivos dentro da pasta específica
         query = f"'{FOLDER_ID}' in parents and name contains '{file_name_pattern}' and trashed = false"
         results = service.files().list(q=query, fields="files(id, name)").execute()
         files = results.get('files', [])
-        
         if not files:
             return None
         
-        # Pega o primeiro arquivo encontrado correspondente
         file_id = files[0]['id']
-        
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
@@ -51,18 +44,15 @@ def baixar_csv_do_drive(service, file_name_pattern):
             status, done = downloader.next_chunk()
             
         fh.seek(0)
-        # Tenta ler com encoding latin1 e separador ponto e vírgula (padrão Ambev/SIV)
         return pd.read_csv(fh, sep=';', encoding='latin1', low_memory=False)
     except Exception as e:
-        st.error(f"Erro ao baixar o arquivo {file_name_pattern}: {e}")
+        st.error(f"Erro ao baixar {file_name_pattern}: {e}")
         return None
 
-# Botão para atualizar dados manualmente se desejar
 if st.button("🔄 Atualizar Dados do Google Drive"):
     st.cache_data.clear()
     st.rerun()
 
-# Inicializa o serviço do Drive
 service = get_drive_service()
 
 if service:
@@ -73,27 +63,26 @@ if service:
 
     if df_pedidos is not None and df_bees is not None and df_skus is not None:
         
-        # 1. Limpeza e Tratamento
+        # Tratamentos e Limpezas
         df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL'}, inplace=True)
         df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'], errors='coerce').fillna(0)
         df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
         df_skus['FHL'] = pd.to_numeric(df_skus['FHL'], errors='coerce').fillna(1.0)
 
-        # 2. Cruzamento com a base de SKUs para buscar Categoria e FHL
+        # Cruzamento com SKUs
         df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria', 'FHL']], on='Produto', how='left')
         df_merged['Volume_HL'] = df_merged['Quantidade'] * df_merged['FHL']
 
-        # 3. Segmentações de Volume
+        # Segmentações
         df_merged['Vol_Cerveja'] = np.where(df_merged['Categoria'].str.upper().str.contains('CERVEJA', na=False), df_merged['Volume_HL'], 0)
         df_merged['Vol_NAB'] = np.where(df_merged['Categoria'].str.upper().str.contains('NAB', na=False), df_merged['Volume_HL'], 0)
         
-        # Faturamento Marketplace
         if 'Origem Pedido' in df_merged.columns:
             df_merged['Fat_Marketplace'] = np.where(df_merged['Origem Pedido'].str.upper().str.contains('MARKETPLACE', na=False), pd.to_numeric(df_merged['Total Pedido'], errors='coerce').fillna(0), 0)
         else:
             df_merged['Fat_Marketplace'] = 0
 
-        # 4. Atribuição de Gerente de Vendas por Setor
+        # Atribuição de Gerente de Vendas
         def define_gerente(setor):
             if 101 <= setor <= 109:
                 return 'Gerente de Vendas 1'
@@ -104,7 +93,7 @@ if service:
 
         df_merged['Gerente'] = df_merged['Setor'].apply(define_gerente)
 
-        # 5. Criação das Abas do Web App
+        # Abas do App
         tab1, tab2 = st.tabs(["📦 Volume", "🎯 Cobertura"])
 
         with tab1:
@@ -136,6 +125,6 @@ if service:
             else:
                 st.warning("Coluna 'Cod. PDV' não encontrada para calcular a cobertura.")
     else:
-        st.error("⚠️️ Não foi possível localizar um ou mais arquivos CSV necessários dentro da pasta do Google Drive informada. Verifique se os nomes batem com: `03.01.36.04`, `03.01.46.06` e `01.11`.")
+        st.error("⚠ Não foi possível localizar os arquivos CSV na pasta do Google Drive. Verifique se os nomes batem com: `03.01.36.04`, `03.01.46.06` e `01.11`.")
 else:
-    st.warning("⚙️ Credenciais da API do Google Drive não configuradas. Certifique-se de configurar o arquivo de segredos se for rodar na nuvem.")
+    st.warning("⚙️ Credenciais do Google Drive não configuradas nos secrets do Streamlit.")
