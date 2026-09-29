@@ -26,7 +26,7 @@ def get_drive_service():
         st.error(f"Erro ao autenticar com as credenciais do Google Drive: {e}")
     return None
 
-@st.cache_data(ttl=1800)  # Cache robusto para evitar quedas de SSL ao mexer nos filtros (dura 30 min)
+@st.cache_data(ttl=1800)
 def carregar_dados_do_drive():
     service = get_drive_service()
     if not service:
@@ -53,14 +53,13 @@ def carregar_dados_do_drive():
         except Exception as e:
             return None
 
-        
     df_pedidos = baixar_csv_do_drive("03.01.36.04")
     df_bees = baixar_csv_do_drive("03.01.46.06")
     df_skus = baixar_csv_do_drive("01.11")
     
     return df_pedidos, df_bees, df_skus
 
-col_b1, col_b2 = st.columns([0.2, 0.8])
+col_b1, _ = st.columns([0.2, 0.8])
 if col_b1.button("🔄 Atualizar Cache / Drive"):
     st.cache_data.clear()
     st.rerun()
@@ -72,20 +71,27 @@ if df_pedidos is not None and df_skus is not None:
     
     # --- TRATAMENTO E PADRONIZAÇÃO ---
     df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL'}, inplace=True)
-    df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'], errors='coerce').fillna(0)
     df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
     
-    # Correção do FHL (divisão exata ajustada)
-    df_skus['FHL'] = pd.to_numeric(df_skus['FHL'], errors='coerce').fillna(1.0) / 10.0
+    # Usando o Volume Total nativo do sistema da rotina (que já traz o HL oficial correto)
+    if 'Volume Total' in df_pedidos.columns:
+        df_pedidos['Volume_HL'] = pd.to_numeric(df_pedidos['Volume Total'], errors='coerce').fillna(0)
+    elif 'Volume Pedido' in df_pedidos.columns:
+        df_pedidos['Volume_HL'] = pd.to_numeric(df_pedidos['Volume Pedido'], errors='coerce').fillna(0)
+    else:
+        # Fallback caso use quantidade * FHL sem divisão arbitrária
+        df_skus['FHL'] = pd.to_numeric(df_skus['FHL'], errors='coerce').fillna(1.0)
+        df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'], errors='coerce').fillna(0)
+        df_merged_temp = pd.merge(df_pedidos, df_skus[['Produto', 'FHL']], on='Produto', how='left')
+        df_pedidos['Volume_HL'] = df_merged_temp['Quantidade'] * df_merged_temp['FHL']
 
-    # Cruzamento com SKUs na rotina do dia
-    df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria', 'FHL']], on='Produto', how='left')
-    df_merged['Volume_HL'] = df_merged['Quantidade'] * df_merged['FHL']
+    # Cruzamento com SKUs para buscar Categoria
+    df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria']], on='Produto', how='left')
 
     # Segmentações de Categoria
     cat_series = df_merged['Categoria'].fillna("").astype(str).str.upper()
     df_merged['Vol_Cerveja'] = np.where(cat_series.str.contains('CERVEJA', na=False), df_merged['Volume_HL'], 0)
-    df_merged['Vol_NAB'] = np.where(cat_series.str.contains('NAB', na=False), df_merged['Volume_HL'], 0)
+    df_merged['Vol_NAB'] = np.where(cat_series.str.contains('NAB', na=False) | cat_series.str.contains('REFRIGERANTE', na=False), df_merged['Volume_HL'], 0)
 
     # Faturamento Marketplace na rotina principal (03.01.36.04)
     if 'Total Pedido' in df_merged.columns and 'Origem Pedido' in df_merged.columns:
@@ -139,9 +145,9 @@ if df_pedidos is not None and df_skus is not None:
 
     st.markdown("---")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("📦 Volume Total", f"{tot_vol:,.2f} HL")
-    col2.metric("🍺 Volume Cerveja", f"{tot_cerveja:,.2f} HL")
-    col3.metric("🥤 Volume NAB", f"{tot_nab:,.2f} HL")
+    col1.metric("📦 Volume Total", f"{tot_vol:,.1f} HL")
+    col2.metric("🍺 Volume Cerveja", f"{tot_cerveja:,.1f} HL")
+    col3.metric("🥤 Volume NAB", f"{tot_nab:,.1f} HL")
     col4.metric("🛒 Fat. Marketplace", f"R$ {tot_mkt:,.2f}")
     st.markdown("---")
 
@@ -159,9 +165,9 @@ if df_pedidos is not None and df_skus is not None:
         }).reset_index()
 
         st.dataframe(resumo_vol.style.format({
-            'Volume_HL': '{:.2f} HL',
-            'Vol_Cerveja': '{:.2f} HL',
-            'Vol_NAB': '{:.2f} HL',
+            'Volume_HL': '{:.1f} HL',
+            'Vol_Cerveja': '{:.1f} HL',
+            'Vol_NAB': '{:.1f} HL',
             'Fat_Marketplace': 'R$ {:,.2f}'
         }), use_container_width=True)
 
