@@ -48,7 +48,7 @@ def baixar_csv_do_drive(service, file_name_pattern):
         st.error(f"Erro ao baixar {file_name_pattern}: {e}")
         return None
 
-if st.sidebar.button("🔄 Atualizar Dados do Google Drive"):
+if st.button("🔄 Atualizar Dados do Google Drive"):
     st.cache_data.clear()
     st.rerun()
 
@@ -60,15 +60,17 @@ if service:
         df_bees = baixar_csv_do_drive(service, "03.01.46.06")
         df_skus = baixar_csv_do_drive(service, "01.11")
 
-    if df_pedidos is not None and df_bees is not None and df_skus is not None:
+    if df_pedidos is not None and df_skus is not None:
         
         # --- TRATAMENTO E PADRONIZAÇÃO ---
         df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL'}, inplace=True)
         df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'], errors='coerce').fillna(0)
         df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
-        df_skus['FHL'] = pd.to_numeric(df_skus['FHL'], errors='coerce').fillna(1.0)
+        
+        # Correção do FHL (Dividindo por 10 para ajustar a escala exata solicitada)
+        df_skus['FHL'] = pd.to_numeric(df_skus['FHL'], errors='coerce').fillna(1.0) / 10.0
 
-        # Cruzamento com SKUs
+        # Cruzamento com SKUs na rotina do dia
         df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria', 'FHL']], on='Produto', how='left')
         df_merged['Volume_HL'] = df_merged['Quantidade'] * df_merged['FHL']
 
@@ -76,11 +78,25 @@ if service:
         df_merged['Vol_Cerveja'] = np.where(df_merged['Categoria'].str.upper().str.contains('CERVEJA', na=False), df_merged['Volume_HL'], 0)
         df_merged['Vol_NAB'] = np.where(df_merged['Categoria'].str.upper().str.contains('NAB', na=False), df_merged['Volume_HL'], 0)
 
-        # Faturamento Marketplace (Verificando origem e colunas de total nas duas bases)
+        # Faturamento Marketplace unificando as colunas das rotinas (03.01.36.04 e 03.01.46.06 do BEES)
+        # Verificando Total Pedido na rotina 04 e Valor Total Pedido na rotina BEES
         if 'Total Pedido' in df_merged.columns and 'Origem Pedido' in df_merged.columns:
-            df_merged['Fat_Marketplace'] = np.where(df_merged['Origem Pedido'].str.upper().str.contains('MARKETPLACE', na=False), pd.to_numeric(df_merged['Total Pedido'], errors='coerce').fillna(0), 0)
+            df_merged['Fat_Marketplace'] = np.where(
+                df_merged['Origem Pedido'].str.upper().str.contains('MARKETPLACE', na=False), 
+                pd.to_numeric(df_merged['Total Pedido'], errors='coerce').fillna(0), 0
+            )
         else:
             df_merged['Fat_Marketplace'] = 0
+
+        # Tratando também os pedidos do BEES caso estejam presentes para somar ao Marketplace / Volume
+        if df_bees is not None and not df_bees.empty:
+            if 'Valor Total Pedido' in df_bees.columns and 'Origem Pedido' in df_bees.columns:
+                df_bees['Fat_Marketplace'] = np.where(
+                    df_bees['Origem Pedido'].str.upper().str.contains('MARKETPLACE', na=False),
+                    pd.to_numeric(df_bees['Valor Total Pedido'], errors='coerce').fillna(0), 0
+                )
+            else:
+                df_bees['Fat_Marketplace'] = 0
 
         # Atribuição de Gerente de Vendas
         def define_gerente(setor):
@@ -93,14 +109,14 @@ if service:
 
         df_merged['Gerente'] = df_merged['Setor'].apply(define_gerente)
 
-        # --- FILTROS NA BARRA LATERAL ---
-        st.sidebar.header("🔍 Filtros do Painel")
-        
-        gerentes_disponiveis = sorted(df_merged['Gerente'].unique())
-        gerente_selecionado = st.sidebar.multiselect("Gerente de Vendas", options=gerentes_disponiveis, default=gerentes_disponiveis)
-        
-        setores_disponiveis = sorted(df_merged['Setor'].unique())
-        setor_selecionado = st.sidebar.multiselect("Setor", options=setores_disponiveis, default=setores_disponiveis)
+        # --- FILTRO EM SUSPENSÃO (EXPANDER) ---
+        with st.expander("🔍 Filtros Avançados (Gerente / Setor)", expanded=False):
+            col_f1, col_f2 = st.columns(2)
+            gerentes_disponiveis = sorted(df_merged['Gerente'].unique())
+            gerente_selecionado = col_f1.multiselect("Filtrar por Gerente de Vendas", options=gerentes_disponiveis, default=gerentes_disponiveis)
+            
+            setores_disponiveis = sorted(df_merged['Setor'].unique())
+            setor_selecionado = col_f2.multiselect("Filtrar por Setor", options=setores_disponiveis, default=setores_disponiveis)
 
         # Aplicando filtros
         df_filtrado = df_merged[
@@ -112,7 +128,11 @@ if service:
         tot_vol = df_filtrado['Volume_HL'].sum()
         tot_cerveja = df_filtrado['Vol_Cerveja'].sum()
         tot_nab = df_filtrado['Vol_NAB'].sum()
+        
+        # Somando faturamento marketplace considerando a base filtrada + BEES se houver correspondência
         tot_mkt = df_filtrado['Fat_Marketplace'].sum()
+        if df_bees is not None and 'Fat_Marketplace' in df_bees.columns:
+            tot_mkt += df_bees['Fat_Marketplace'].sum()
 
         st.markdown("---")
         col1, col2, col3, col4 = st.columns(4)
