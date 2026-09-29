@@ -67,51 +67,54 @@ if col_b1.button("🔄 Atualizar Cache / Drive"):
 with st.spinner("Carregando e processando bases de dados..."):
     df_pedidos, df_bees, df_skus = carregar_dados_do_drive()
 
-if df_pedidos is not None and df_skus is not None:
+if df_pedidos is not None and not df_pedidos.empty:
     
-    # --- TRATAMENTO E PADRONIZAÇÃO ---
-    df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL'}, inplace=True)
+    # Padronização de colunas
     df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
     
-    # Usando o Volume Total nativo do sistema da rotina (que já traz o HL oficial correto)
+    # Identificar a coluna de volume disponível na rotina
     if 'Volume Total' in df_pedidos.columns:
-        df_pedidos['Volume_HL'] = pd.to_numeric(df_pedidos['Volume Total'], errors='coerce').fillna(0)
+        df_pedidos['Volume_HL'] = pd.to_numeric(df_pedidos['Volume Total'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
     elif 'Volume Pedido' in df_pedidos.columns:
-        df_pedidos['Volume_HL'] = pd.to_numeric(df_pedidos['Volume Pedido'], errors='coerce').fillna(0)
-    else:
-        # Fallback caso use quantidade * FHL sem divisão arbitrária
-        df_skus['FHL'] = pd.to_numeric(df_skus['FHL'], errors='coerce').fillna(1.0)
-        df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'], errors='coerce').fillna(0)
+        df_pedidos['Volume_HL'] = pd.to_numeric(df_pedidos['Volume Pedido'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+    elif 'Quantidade' in df_pedidos.columns and df_skus is not None:
+        df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL'}, inplace=True)
+        df_skus['FHL'] = pd.to_numeric(df_skus['FHL'].astype(str).str.replace(',', '.'), errors='coerce').fillna(1.0)
+        df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
         df_merged_temp = pd.merge(df_pedidos, df_skus[['Produto', 'FHL']], on='Produto', how='left')
         df_pedidos['Volume_HL'] = df_merged_temp['Quantidade'] * df_merged_temp['FHL']
+    else:
+        df_pedidos['Volume_HL'] = 0.0
 
-    # Cruzamento com SKUs para buscar Categoria
-    df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria']], on='Produto', how='left')
+    # Cruzamento com SKUs para Categoria
+    if df_skus is not None:
+        df_skus.rename(columns={'Código': 'Produto', 'Categoria': 'Categoria'}, inplace=True)
+        df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria']], on='Produto', how='left')
+    else:
+        df_merged = df_pedidos
+        df_merged['Categoria'] = 'GERAL'
 
     # Segmentações de Categoria
     cat_series = df_merged['Categoria'].fillna("").astype(str).str.upper()
     df_merged['Vol_Cerveja'] = np.where(cat_series.str.contains('CERVEJA', na=False), df_merged['Volume_HL'], 0)
     df_merged['Vol_NAB'] = np.where(cat_series.str.contains('NAB', na=False) | cat_series.str.contains('REFRIGERANTE', na=False), df_merged['Volume_HL'], 0)
 
-    # Faturamento Marketplace na rotina principal (03.01.36.04)
+    # Faturamento Marketplace
     if 'Total Pedido' in df_merged.columns and 'Origem Pedido' in df_merged.columns:
         origem_p = df_merged['Origem Pedido'].fillna("").astype(str).str.upper()
-        df_merged['Fat_Marketplace'] = np.where(
-            origem_p.str.contains('MARKETPLACE', na=False), 
-            pd.to_numeric(df_merged['Total Pedido'], errors='coerce').fillna(0), 0
-        )
+        tot_p = pd.to_numeric(df_merged['Total Pedido'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+        df_merged['Fat_Marketplace'] = np.where(origem_p.str.contains('MARKETPLACE', na=False), tot_p, 0)
     else:
         df_merged['Fat_Marketplace'] = 0
 
-    # Tratamento para a base do BEES (03.01.46.06)
     fat_bees_total = 0.0
     if df_bees is not None and not df_bees.empty:
         if 'Valor Total Pedido' in df_bees.columns and 'Origem Pedido' in df_bees.columns:
             origem_b = df_bees['Origem Pedido'].fillna("").astype(str).str.upper()
-            val_bees = pd.to_numeric(df_bees['Valor Total Pedido'], errors='coerce').fillna(0)
+            val_bees = pd.to_numeric(df_bees['Valor Total Pedido'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
             fat_bees_total = np.where(origem_b.str.contains('MARKETPLACE', na=False), val_bees, 0).sum()
 
-    # Atribuição de Gerente de Vendas
+    # Gerente por Setor
     def define_gerente(setor):
         if 101 <= setor <= 109:
             return 'Gerente de Vendas 1'
@@ -122,7 +125,7 @@ if df_pedidos is not None and df_skus is not None:
 
     df_merged['Gerente'] = df_merged['Setor'].apply(define_gerente)
 
-    # --- FILTRO EM SUSPENSÃO (EXPANDER) ---
+    # Filtros em Suspensão
     with st.expander("🔍 Filtros Avançados (Gerente / Setor)", expanded=True):
         col_f1, col_f2 = st.columns(2)
         gerentes_disponiveis = sorted(df_merged['Gerente'].unique())
@@ -131,13 +134,12 @@ if df_pedidos is not None and df_skus is not None:
         setores_disponiveis = sorted(df_merged['Setor'].unique())
         setor_selecionado = col_f2.multiselect("Filtrar por Setor", options=setores_disponiveis, default=setores_disponiveis)
 
-    # Aplicando filtros
     df_filtrado = df_merged[
         (df_merged['Gerente'].isin(gerente_selecionado)) & 
         (df_merged['Setor'].isin(setor_selecionado))
     ]
 
-    # --- CARDS DE KPIs (TOPO) ---
+    # KPIs
     tot_vol = df_filtrado['Volume_HL'].sum()
     tot_cerveja = df_filtrado['Vol_Cerveja'].sum()
     tot_nab = df_filtrado['Vol_NAB'].sum()
@@ -151,12 +153,10 @@ if df_pedidos is not None and df_skus is not None:
     col4.metric("🛒 Fat. Marketplace", f"R$ {tot_mkt:,.2f}")
     st.markdown("---")
 
-    # --- ABAS DO APP ---
     tab1, tab2 = st.tabs(["📦 Volume", "🎯 Cobertura"])
 
     with tab1:
         st.subheader("Consolidado de Volume por Gerente e Setor")
-        
         resumo_vol = df_filtrado.groupby(['Gerente', 'Setor']).agg({
             'Volume_HL': 'sum',
             'Vol_Cerveja': 'sum',
@@ -173,14 +173,13 @@ if df_pedidos is not None and df_skus is not None:
 
     with tab2:
         st.subheader("Cobertura Diária (Clientes Positivados por Setor)")
-        
-        if 'Cod. PDV' in df_filtrado.columns:
+        pdv_col = 'Cod. PDV' if 'Cod. PDV' in df_filtrado.columns else ('Cliente' if 'Cliente' in df_filtrado.columns else None)
+        if pdv_col:
             resumo_cob = df_filtrado.groupby(['Gerente', 'Setor']).agg(
-                Clientes_Positivados=('Cod. PDV', 'nunique')
+                Clientes_Positivados=(pdv_col, 'nunique')
             ).reset_index()
-            
             st.dataframe(resumo_cob, use_container_width=True)
         else:
-            st.warning("Coluna 'Cod. PDV' não encontrada para calcular a cobertura.")
+            st.warning("Coluna de identificação de cliente/PDV não encontrada.")
 else:
-    st.error("⚠ Não foi possível carregar os arquivos CSV do Google Drive. Clique no botão de atualizar acima.")
+    st.error("⚠ Não foi possível carregar os dados. Verifique os arquivos CSV na pasta do Google Drive.")
