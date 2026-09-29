@@ -1,6 +1,6 @@
-streamlit
 pandas
 numpy
 gspread
 google-auth
 oauth2client
+flask
