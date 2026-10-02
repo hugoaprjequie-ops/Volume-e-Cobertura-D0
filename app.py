@@ -9,7 +9,7 @@ from googleapiclient.http import MediaIoBaseDownload
 st.set_page_config(page_title="Dashboard Diário - Volume & Cobertura", layout="wide")
 
 st.title("📊 Painel Diário de Vendas - GP7 Jequié")
-st.markdown("Acompanhamento de **Volume (HL)** por Fator Hectolitro, **Cerveja**, **NAB**, **Marketplace** e **Cobertura** integrados do Google Drive.")
+st.markdown("Acompanhamento de **Volume (HL)**, **Cerveja**, **NAB**, **Marketplace** e **Cobertura** integrados do Google Drive.")
 
 FOLDER_ID = "1Kw_oHgF0npTcXLkMKek51bKdAF0TAWca"
 
@@ -69,7 +69,7 @@ with st.spinner("Carregando e processando bases de dados..."):
 
 if df_pedidos is not None and not df_pedidos.empty and df_skus is not None:
     
-    # Função para limpar valores numéricos com vírgula/ponto do SIV
+    # Função auxiliar para limpar valores numéricos
     def limpar_numerico(serie):
         if serie.dtype == object:
             return pd.to_numeric(serie.astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False), errors='coerce').fillna(0)
@@ -78,16 +78,25 @@ if df_pedidos is not None and not df_pedidos.empty and df_skus is not None:
     df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
     df_pedidos['Quantidade'] = limpar_numerico(df_pedidos['Quantidade'])
 
-    # Padronização e limpeza da base de SKUs
+    # Padronização de chaves de texto para evitar falha no merge
+    df_pedidos['Produto_Key'] = df_pedidos['Produto'].astype(str).str.strip()
     df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL', 'Categoria': 'Categoria'}, inplace=True)
+    df_skus['Produto_Key'] = df_skus['Produto'].astype(str).str.strip()
     df_skus['FHL'] = limpar_numerico(df_skus['FHL'])
 
-    # CRUZAMENTO ESSENCIAL: Pedidos + Base de SKUs
-    df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria', 'FHL']], on='Produto', how='left')
-    df_merged['FHL'] = df_merged['FHL'].fillna(0.0)
+    # CRUZAMENTO ROBUSTO
+    df_merged = pd.merge(df_pedidos, df_skus[['Produto_Key', 'Categoria', 'FHL']], on='Produto_Key', how='left')
+    
+    # Se o FHL vier nulo, tenta usar 1.0 para não zerar a quantidade
+    df_merged['FHL'] = df_merged['FHL'].fillna(1.0)
 
-    # CÁLCULO CORRETO: Volume (HL) = Quantidade x Fator Hectolitro (FHL)
+    # CÁLCULO DE VOLUME (HL) = Quantidade x FHL (ou Volume Total nativo se preferir)
     df_merged['Volume_HL'] = df_merged['Quantidade'] * df_merged['FHL']
+    
+    # Se o cálculo por quantidade der 0 mas existir Volume Total na base, usa o volume nativo
+    if 'Volume Total' in df_merged.columns:
+        vol_nativo = limpar_numerico(df_merged['Volume Total'])
+        df_merged['Volume_HL'] = np.where(df_merged['Volume_HL'] == 0, vol_nativo, df_merged['Volume_HL'])
 
     # Segmentações de Categoria
     cat_series = df_merged['Categoria'].fillna("").astype(str).str.upper()
