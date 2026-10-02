@@ -9,7 +9,7 @@ from googleapiclient.http import MediaIoBaseDownload
 st.set_page_config(page_title="Dashboard Diário - Volume & Cobertura", layout="wide")
 
 st.title("📊 Painel Diário de Vendas - GP7 Jequié")
-st.markdown("Acompanhamento de **Volume (HL)**, **Cerveja**, **NAB**, **Marketplace** e **Cobertura** integrados do Google Drive.")
+st.markdown("Acompanhamento de **Volume (HL)** por Fator Hectolitro, **Cerveja**, **NAB**, **Marketplace** e **Cobertura** integrados do Google Drive.")
 
 FOLDER_ID = "1Kw_oHgF0npTcXLkMKek51bKdAF0TAWca"
 
@@ -67,32 +67,27 @@ if col_b1.button("🔄 Atualizar Cache / Drive"):
 with st.spinner("Carregando e processando bases de dados..."):
     df_pedidos, df_bees, df_skus = carregar_dados_do_drive()
 
-if df_pedidos is not None and not df_pedidos.empty:
+if df_pedidos is not None and not df_pedidos.empty and df_skus is not None:
     
-    # Padronização de colunas
-    df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
-    
-    # Identificar a coluna de volume disponível na rotina
-    if 'Volume Total' in df_pedidos.columns:
-        df_pedidos['Volume_HL'] = pd.to_numeric(df_pedidos['Volume Total'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
-    elif 'Volume Pedido' in df_pedidos.columns:
-        df_pedidos['Volume_HL'] = pd.to_numeric(df_pedidos['Volume Pedido'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
-    elif 'Quantidade' in df_pedidos.columns and df_skus is not None:
-        df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL'}, inplace=True)
-        df_skus['FHL'] = pd.to_numeric(df_skus['FHL'].astype(str).str.replace(',', '.'), errors='coerce').fillna(1.0)
-        df_pedidos['Quantidade'] = pd.to_numeric(df_pedidos['Quantidade'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
-        df_merged_temp = pd.merge(df_pedidos, df_skus[['Produto', 'FHL']], on='Produto', how='left')
-        df_pedidos['Volume_HL'] = df_merged_temp['Quantidade'] * df_merged_temp['FHL']
-    else:
-        df_pedidos['Volume_HL'] = 0.0
+    # Função para limpar valores numéricos com vírgula/ponto do SIV
+    def limpar_numerico(serie):
+        if serie.dtype == object:
+            return pd.to_numeric(serie.astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False), errors='coerce').fillna(0)
+        return pd.to_numeric(serie, errors='coerce').fillna(0)
 
-    # Cruzamento com SKUs para Categoria
-    if df_skus is not None:
-        df_skus.rename(columns={'Código': 'Produto', 'Categoria': 'Categoria'}, inplace=True)
-        df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria']], on='Produto', how='left')
-    else:
-        df_merged = df_pedidos
-        df_merged['Categoria'] = 'GERAL'
+    df_pedidos['Setor'] = pd.to_numeric(df_pedidos['Setor'], errors='coerce').fillna(0)
+    df_pedidos['Quantidade'] = limpar_numerico(df_pedidos['Quantidade'])
+
+    # Padronização e limpeza da base de SKUs
+    df_skus.rename(columns={'Código': 'Produto', 'Fator Hectolitro': 'FHL', 'Categoria': 'Categoria'}, inplace=True)
+    df_skus['FHL'] = limpar_numerico(df_skus['FHL'])
+
+    # CRUZAMENTO ESSENCIAL: Pedidos + Base de SKUs
+    df_merged = pd.merge(df_pedidos, df_skus[['Produto', 'Categoria', 'FHL']], on='Produto', how='left')
+    df_merged['FHL'] = df_merged['FHL'].fillna(0.0)
+
+    # CÁLCULO CORRETO: Volume (HL) = Quantidade x Fator Hectolitro (FHL)
+    df_merged['Volume_HL'] = df_merged['Quantidade'] * df_merged['FHL']
 
     # Segmentações de Categoria
     cat_series = df_merged['Categoria'].fillna("").astype(str).str.upper()
@@ -102,7 +97,7 @@ if df_pedidos is not None and not df_pedidos.empty:
     # Faturamento Marketplace
     if 'Total Pedido' in df_merged.columns and 'Origem Pedido' in df_merged.columns:
         origem_p = df_merged['Origem Pedido'].fillna("").astype(str).str.upper()
-        tot_p = pd.to_numeric(df_merged['Total Pedido'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+        tot_p = limpar_numerico(df_merged['Total Pedido'])
         df_merged['Fat_Marketplace'] = np.where(origem_p.str.contains('MARKETPLACE', na=False), tot_p, 0)
     else:
         df_merged['Fat_Marketplace'] = 0
@@ -111,10 +106,10 @@ if df_pedidos is not None and not df_pedidos.empty:
     if df_bees is not None and not df_bees.empty:
         if 'Valor Total Pedido' in df_bees.columns and 'Origem Pedido' in df_bees.columns:
             origem_b = df_bees['Origem Pedido'].fillna("").astype(str).str.upper()
-            val_bees = pd.to_numeric(df_bees['Valor Total Pedido'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+            val_bees = limpar_numerico(df_bees['Valor Total Pedido'])
             fat_bees_total = np.where(origem_b.str.contains('MARKETPLACE', na=False), val_bees, 0).sum()
 
-    # Gerente por Setor
+    # Gerente por Setor (G1: 101-109 | G2: 201-208)
     def define_gerente(setor):
         if 101 <= setor <= 109:
             return 'Gerente de Vendas 1'
@@ -182,4 +177,4 @@ if df_pedidos is not None and not df_pedidos.empty:
         else:
             st.warning("Coluna de identificação de cliente/PDV não encontrada.")
 else:
-    st.error("⚠ Não foi possível carregar os dados. Verifique os arquivos CSV na pasta do Google Drive.")
+    st.error("⚠ Não foi possível carregar os dados ou a base de SKUs. Verifique os arquivos CSV no Google Drive.")
